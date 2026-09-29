@@ -178,6 +178,10 @@ svg { display: block; }
 .topbar h1 { font-size: clamp(28px, 3.4vw, 38px); font-weight: 700; letter-spacing: -0.03em; line-height: 1.1; }
 .lede { color: var(--ink-2); margin-top: 8px; font-size: 15px; max-width: 60ch; }
 .topbar-actions { display: flex; gap: 8px; flex: none; }
+/* online mode: the account chip makes the actions wider, so let them wrap under the title */
+body:not([data-role="local"]) .topbar { flex-wrap: wrap; row-gap: 16px; }
+body:not([data-role="local"]) .topbar > :first-child { flex: 1 1 auto; min-width: min(420px, 100%); }
+body:not([data-role="local"]) .topbar-actions { flex-wrap: wrap; flex: 0 1 auto; }
 
 .btn, .icon-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;

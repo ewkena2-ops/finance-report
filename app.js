@@ -1,7 +1,8 @@
 /* ==========================================================================
    Group Finance Reporting — app
    Nine reports for the group finance controller, calculated from the data
-   sheet. Figures are saved on this device only (browser storage).
+   sheet. Figures are shared online through the Cloudflare server named in
+   config.js (with login and roles), or saved on this device when it is empty.
    ========================================================================== */
 (() => {
   "use strict";
@@ -98,14 +99,14 @@
     for (const k of DATASETS) if (!Array.isArray(out[k])) out[k] = [];
     return out;
   }
-  // Online mode: when config.js names a Supabase project, figures are shared and need a login
+  // Online mode: when config.js names the Cloudflare Worker API, figures are shared and need a login
   const CFG = window.FINANCE_CONFIG || {};
-  const CONNECTED = !!(CFG.supabaseUrl && CFG.supabaseAnonKey);
+  const CONNECTED = !!CFG.apiUrl;
   const STAFF_SHEETS = ["accounts", "balances", "transactions", "forecast", "reconItems", "monthly"];
   const STAFF_WRITE = ["balances", "transactions", "forecast", "reconItems", "monthly"];
   const PRIVATE_KEYS = ["fixedPay", "complianceBonus", "accuracyBonus"];
   const ROLE_LABEL = { owner: "Chairman (owner)", controller: "Finance controller", staff: "Finance staff" };
-  let sb = null, ROLE = null, ME = null;
+  let ROLE = null, ME = null;
   const canSee = (id) => ROLE !== "staff" || STAFF_SHEETS.includes(id);
   const canWrite = (id) => !CONNECTED || ROLE === "owner" || ROLE === "controller" || STAFF_WRITE.includes(id);
   let LOCAL = false;
@@ -920,7 +921,7 @@
     $("#sent-to").textContent = `${C.chairman || "Chairman"} (report 6 also ${C.financeOfficer || "finance officer"})`;
     $("#lede").textContent = `Nine reports prepared by ${C.controller || "the controller"} for ${C.chairman || "the Chairman"}. Deadlines are fixed. Formats are fixed.`;
     $("#foot-period").textContent = `amounts in ${CUR}`;
-    $("#foot-note").textContent = D.sample ? "Showing example data. Clear it with Start empty in the Data sheet." : "Figures are saved on this device only. Back up with Export Excel; share reports as PDF.";
+    $("#foot-note").textContent = CONNECTED ? "Figures are saved online and shown only to the people the Chairman gave access. Share reports as PDF." : D.sample ? "Showing example data. Clear it with Start empty in the Data sheet." : "Figures are saved on this device only. Back up with Export Excel; share reports as PDF.";
   }
   function renderBanner() {
     const el = $("#data-banner");
@@ -1091,7 +1092,7 @@
     const drawGrid = () => {
       const q = sheetUI.q.toLowerCase();
       const visible = rows.map((r, i) => [r, i]).filter(([r]) => !q || def.cols.some((c) => String(r[c.key] ?? "").toLowerCase().includes(q)));
-      count.textContent = q ? `${num(visible.length)} of ${num(rows.length)} rows` : `${num(rows.length)} rows`;
+      count.textContent = q ? `${num(visible.length)} of ${num(rows.length)} rows` : `${num(rows.length)} ${rows.length === 1 ? "row" : "rows"}`;
       if (!rows.length) { gridWrap.replaceChildren(h("div", { class: "sheet-empty" }, h("strong", {}, `No ${def.label.toLowerCase()} yet. `), "Tap Add row, or import an Excel/CSV file.")); return; }
       const thead = h("thead", {}, h("tr", {}, h("th", { class: "rn", scope: "col" }, "#"), def.cols.map((c) => h("th", { class: c.type === "number" ? "num" : null, scope: "col", style: `min-width:${c.w}px` }, c.label)), h("th", { scope: "col" }, h("span", { class: "sr-only" }, "Delete"))));
       gridWrap.replaceChildren(h("table", { class: "sheet-grid" }, thead, h("tbody", {}, visible.map(([r, i]) => sheetRow(def, r, i, ro)))));
@@ -1510,17 +1511,31 @@
   }
 
   /* ==========================================================================
-     ONLINE MODE — Supabase login, shared data, live updates
+     ONLINE MODE — Cloudflare Worker API: login, shared data, live updates
      ========================================================================== */
   const authEl = $("#auth");
+  const TOKEN_KEY = "gf-session";
+  let TOKEN = null, REV = 0, pollTimer = 0;
   let snap = new Map(), setSnap = { general: "", private: "" };
-  let syncTimer = 0, syncing = false, syncAgain = false, pending = false, channel = null;
+  let syncTimer = 0, syncing = false, syncAgain = false, pending = false;
   const keyOf = (ds, rid) => `${ds}\u0000${rid}`;
-  function isPersonalRec(ds, r) {
-    if (ds === "accounts") return r.type === "Personal" || r.company === "Personal";
-    if (r.company === "Personal") return true;
-    if (r.account) { const a = D.accounts.find((x) => accLabel(x) === r.account); if (a && (a.type === "Personal" || a.company === "Personal")) return true; }
-    return false;
+  try { TOKEN = localStorage.getItem(TOKEN_KEY); } catch (e) { /* storage blocked */ }
+  function saveToken(t) { TOKEN = t; try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ } }
+  async function api(path, body) {
+    const res = await fetch(String(CFG.apiUrl).replace(/\/+$/, "") + path, {
+      method: body ? "POST" : "GET",
+      headers: { "Content-Type": "application/json", ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* empty body */ }
+    if (res.status === 401 && TOKEN && path !== "/api/login") {
+      saveToken(null); ROLE = null; clearInterval(pollTimer);
+      showAuth("signin", (data && data.error) || "Your session ended. Please sign in again.");
+      throw Object.assign(new Error("Signed out"), { quiet: true });
+    }
+    if (!res.ok) throw new Error((data && data.error) || `Server error ${res.status}`);
+    return data;
   }
   function splitSettings() {
     const general = {}, priv = {};
@@ -1541,7 +1556,7 @@
     el.title = detail || (st === "saved" ? "All changes are saved online" : "");
   }
   function scheduleSync() {
-    if (!sb || !ROLE) return;
+    if (!ROLE) return;
     pending = true;
     setSyncState("saving");
     clearTimeout(syncTimer);
@@ -1551,47 +1566,38 @@
     if (syncing) { syncAgain = true; return; }
     syncing = true;
     try {
-      const up = [], seen = new Set();
+      const ups = [], seen = new Set();
       for (const ds of DATASETS) {
         if (!canWrite(ds)) { for (const r of D[ds]) seen.add(keyOf(ds, r.id)); continue; }
         for (const r of D[ds]) {
-          if (!r.id) r.id = nextId(SHEETS.find((d) => d.id === ds) || { prefix: "X-" });
+          if (!/^[A-Za-z0-9._:-]{1,80}$/.test(String(r.id || ""))) r.id = nextId(SHEETS.find((d) => d.id === ds) || { prefix: "X-" });
           const k = keyOf(ds, r.id);
           seen.add(k);
-          const json = JSON.stringify(r);
-          if (snap.get(k) !== json) up.push({ dataset: ds, rid: r.id, data: r, personal: isPersonalRec(ds, r), json });
+          const js = JSON.stringify(r);
+          if (snap.get(k) !== js) ups.push({ dataset: ds, rid: r.id, data: r, js });
         }
       }
-      for (let i = 0; i < up.length; i += 500) {
-        const chunk = up.slice(i, i + 500);
-        const { error } = await sb.from("records").upsert(chunk.map(({ json, ...row }) => row), { onConflict: "dataset,rid" });
-        if (error) throw error;
-        chunk.forEach((u) => snap.set(keyOf(u.dataset, u.rid), u.json));
-      }
-      const byDs = {};
-      [...snap.keys()].filter((k) => !seen.has(k)).forEach((k) => { const [ds, rid] = k.split("\u0000"); (byDs[ds] = byDs[ds] || []).push(rid); });
-      for (const [ds, rids] of Object.entries(byDs)) {
-        for (let i = 0; i < rids.length; i += 200) {
-          const part = rids.slice(i, i + 200);
-          const { error } = await sb.from("records").delete().eq("dataset", ds).in("rid", part);
-          if (error) throw error;
-          part.forEach((rid) => snap.delete(keyOf(ds, rid)));
-        }
-      }
+      const dels = [...snap.keys()].filter((k) => !seen.has(k)).map((k) => { const [dataset, rid] = k.split("\u0000"); return { dataset, rid }; });
+      let settings = null;
       if (ROLE === "owner" || ROLE === "controller") {
         const { general, priv } = splitSettings();
-        const g = JSON.stringify(general), p = JSON.stringify(priv), rows = [];
-        if (g !== setSnap.general) rows.push({ id: "general", data: general });
-        if (p !== setSnap.private) rows.push({ id: "private", data: priv });
-        if (rows.length) {
-          const { error } = await sb.from("settings").upsert(rows);
-          if (error) throw error;
-          setSnap = { general: g, private: p };
-        }
+        const g = JSON.stringify(general), p = JSON.stringify(priv);
+        if (g !== setSnap.general) (settings = settings || {}).general = general;
+        if (p !== setSnap.private) (settings = settings || {}).private = priv;
+      }
+      const jobs = [...ups.map((u) => ["u", u]), ...dels.map((d) => ["d", d])];
+      for (let i = 0; i < Math.max(jobs.length, settings ? 1 : 0); i += 200) {
+        const part = jobs.slice(i, i + 200);
+        const body = { upserts: part.filter((j) => j[0] === "u").map(([, u]) => ({ dataset: u.dataset, rid: u.rid, data: u.data })), deletes: part.filter((j) => j[0] === "d").map(([, d]) => d) };
+        if (i === 0 && settings) body.settings = settings;
+        await api("/api/sync", body);
+        for (const [kind, x] of part) { if (kind === "u") snap.set(keyOf(x.dataset, x.rid), x.js); else snap.delete(keyOf(x.dataset, x.rid)); }
+        if (i === 0 && settings) { if (settings.general) setSnap.general = JSON.stringify(settings.general); if (settings.private) setSnap.private = JSON.stringify(settings.private); }
       }
       pending = false;
       setSyncState("saved");
     } catch (e) {
+      if (e.quiet) return;
       console.error(e);
       setSyncState("error", e.message || String(e));
       toast(`Not saved online (${e.message || e}). Check the internet connection.`, { label: "Try again", run: () => scheduleSync() });
@@ -1601,21 +1607,14 @@
     }
   }
   async function loadAll() {
-    const rows = [];
-    for (let from = 0; ; from += 1000) {
-      const { data, error } = await sb.from("records").select("dataset,rid,data").order("dataset").order("rid").range(from, from + 999);
-      if (error) throw error;
-      rows.push(...data);
-      if (data.length < 1000) break;
-    }
-    const { data: sets, error: e2 } = await sb.from("settings").select("id,data");
-    if (e2) throw e2;
+    const res = await api("/api/data");
     const d = { company: {} };
     for (const k of DATASETS) d[k] = [];
-    for (const r of rows) if (d[r.dataset]) d[r.dataset].push({ ...r.data, id: r.rid });
-    for (const x of sets || []) Object.assign(d.company, x.data || {});
+    for (const r of res.records || []) if (d[r.dataset]) d[r.dataset].push({ ...r.data, id: r.rid });
+    Object.assign(d.company, (res.settings || {}).general || {}, (res.settings || {}).private || {});
     D = normalize(d);
     D.sample = false;
+    REV = res.rev || 0;
     takeSnapshot();
   }
   let renderQueued = false;
@@ -1628,34 +1627,58 @@
       renderQueued = false;
       if (document.body.dataset.view === "sheet") { renderSheetTabs(); renderSheet(); dirty = true; } else rebuildAll();
     };
-    setTimeout(run, 300);
+    setTimeout(run, 200);
   }
-  function applyRemote(p) {
-    const row = p.eventType === "DELETE" ? p.old : p.new;
-    if (!row || !D[row.dataset]) return;
-    const ds = row.dataset, rid = row.rid, k = keyOf(ds, rid), arr = D[ds];
-    const at = arr.findIndex((x) => x.id === rid);
-    if (p.eventType === "DELETE") {
-      if (at < 0) return;
-      arr.splice(at, 1);
-      snap.delete(k);
-    } else {
-      const rec = { ...row.data, id: rid }, json = JSON.stringify(rec);
-      if (snap.get(k) === json) return;
-      if (at >= 0) arr[at] = rec; else arr.push(rec);
-      snap.set(k, json);
-    }
-    queueRemoteRender();
+  async function poll() {
+    if (!ROLE || pending || syncing || document.visibilityState !== "visible") return;
+    try {
+      let changed = false, more = true;
+      while (more) {
+        const res = await api(`/api/changes?since=${REV}`);
+        for (const r of res.records || []) {
+          const arr = D[r.dataset];
+          if (!arr) continue;
+          const k = keyOf(r.dataset, r.rid), at = arr.findIndex((x) => x.id === r.rid);
+          if (r.deleted) { if (at >= 0) { arr.splice(at, 1); changed = true; } snap.delete(k); continue; }
+          const rec = { ...r.data, id: r.rid }, js = JSON.stringify(rec);
+          if (snap.get(k) === js) continue;
+          if (at >= 0) arr[at] = rec; else arr.push(rec);
+          snap.set(k, js);
+          changed = true;
+        }
+        const st = res.settings || {};
+        if (st.general || st.private) {
+          Object.assign(D.company, st.general || {}, st.private || {});
+          const { general, priv } = splitSettings();
+          setSnap = { general: JSON.stringify(general), private: JSON.stringify(priv) };
+          changed = true;
+        }
+        REV = res.rev || REV;
+        more = !!res.more;
+      }
+      if (changed) queueRemoteRender();
+    } catch (e) { /* offline: try again next time */ }
   }
+  function startPolling() {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(poll, 15000);
+  }
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") poll(); });
   function renderAccountChip() {
     const el = $("#account-chip");
     if (!CONNECTED || !ROLE) { el.hidden = true; return; }
-    const name = (ME && ME.user_metadata && ME.user_metadata.name) || (ME && ME.email) || "";
+    const pass = h("button", { class: "btn btn-sm btn-ghost", type: "button", title: "Change your password" }, "Password");
+    pass.addEventListener("click", () => showAuth("changepass"));
     const out = h("button", { class: "btn btn-sm btn-ghost", type: "button", title: "Sign out" }, "Sign out");
-    out.addEventListener("click", async () => { await sb.auth.signOut(); location.reload(); });
-    el.replaceChildren(h("span", { class: "sync-state saved", id: "sync-state" }), h("span", { class: "who" }, h("strong", {}, name), h("span", {}, ROLE_LABEL[ROLE] || ROLE)), out);
+    out.addEventListener("click", signOut);
+    el.replaceChildren(h("span", { class: "sync-state saved", id: "sync-state" }), h("span", { class: "who" }, h("strong", {}, ME.name || ME.email), h("span", {}, ROLE_LABEL[ROLE] || ROLE)), pass, out);
     el.hidden = false;
     setSyncState(pending ? "saving" : "saved");
+  }
+  async function signOut() {
+    try { await api("/api/logout", {}); } catch (e) { /* already signed out */ }
+    saveToken(null);
+    location.reload();
   }
   function applyRoleUI() {
     document.body.dataset.role = CONNECTED ? ROLE || "none" : "local";
@@ -1671,151 +1694,133 @@
     const field = (label, attrs) => { const i = h("input", { class: "input", ...attrs }); return [h("label", { class: "field" }, h("span", {}, label), i), i]; };
     const head = h("div", { class: "auth-head" }, h("span", { class: "brand-mark", "aria-hidden": "true" }, icon("bank")), h("div", {}, h("strong", {}, C.name || "Group"), h("span", {}, "Group Finance Reporting")));
     const link = (text, fn) => { const b = h("button", { class: "linkish", type: "button" }, text); b.addEventListener("click", fn); return b; };
+    const busy = async (btn, fn) => { btn.disabled = true; err.textContent = ""; try { await fn(); } catch (x) { if (!x.quiet) err.textContent = x.message || String(x); btn.disabled = false; } };
     let body = [];
     if (mode === "loading") body = [h("p", { class: "muted" }, "Loading…")];
-    else if (mode === "error") body = [h("p", {}, message || "Something went wrong.")];
+    else if (mode === "error") body = [h("p", {}, message || "Something went wrong."), link("Try again", () => location.reload())];
     else if (mode === "signin" || mode === "signup") {
       const [fName, iName] = field("Your name", { type: "text", autocomplete: "name" });
       const [fEmail, iEmail] = field("Email", { type: "email", autocomplete: "email", required: true });
       const [fPass, iPass] = field("Password", { type: "password", autocomplete: mode === "signin" ? "current-password" : "new-password", required: true, minlength: 8 });
       const go = h("button", { class: "btn btn-primary", type: "submit" }, mode === "signin" ? "Sign in" : "Create account");
       const form = h("form", { class: "auth-form" }, mode === "signup" ? fName : null, fEmail, fPass, err, go);
-      form.addEventListener("submit", async (e) => {
+      form.addEventListener("submit", (e) => {
         e.preventDefault();
-        go.disabled = true; err.textContent = "";
-        try {
+        busy(go, async () => {
           const email = iEmail.value.trim().toLowerCase(), password = iPass.value;
-          const res = mode === "signin" ? await sb.auth.signInWithPassword({ email, password })
-            : await sb.auth.signUp({ email, password, options: { data: { name: iName.value.trim() } } });
-          if (res.error) throw res.error;
-          if (!res.data.session) { showAuth("signin", "Account created. Check your email to confirm it, then sign in."); return; }
-          afterLogin(res.data.session);
-        } catch (x) { err.textContent = x.message || String(x); go.disabled = false; }
+          const res = mode === "signin" ? await api("/api/login", { email, password }) : await api("/api/signup", { email, password, name: iName.value.trim() });
+          saveToken(res.token);
+          await afterLogin(res.me);
+        });
       });
       body = [h("h2", {}, mode === "signin" ? "Sign in" : "Create your account"),
         h("p", { class: "muted" }, mode === "signin" ? "Use the email the Chairman gave access to." : "Use the email the Chairman added in Team & access. Choose a password of at least 8 characters."),
         form,
         h("p", { class: "auth-links" }, mode === "signin"
-          ? [link("First time? Create your account", () => showAuth("signup")), " · ", link("Forgot password?", async () => {
-            const email = iEmail.value.trim();
-            if (!email) { err.textContent = "Type your email first."; return; }
-            const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
-            err.textContent = error ? error.message : "If that email has an account, a reset link is on its way.";
-          })]
+          ? [link("First time? Create your account", () => showAuth("signup")), " · ", link("Forgot password?", () => { err.textContent = "Ask the Chairman to set a new password for you in Team & access."; })]
           : link("I already have an account", () => showAuth("signin")))];
-    } else if (mode === "newpass") {
-      const [fPass, iPass] = field("New password", { type: "password", autocomplete: "new-password", minlength: 8 });
+    } else if (mode === "changepass") {
+      const [fCur, iCur] = field("Current password", { type: "password", autocomplete: "current-password" });
+      const [fNew, iNew] = field("New password (at least 8 characters)", { type: "password", autocomplete: "new-password", minlength: 8 });
       const go = h("button", { class: "btn btn-primary", type: "submit" }, "Save new password");
-      const form = h("form", { class: "auth-form" }, fPass, err, go);
-      form.addEventListener("submit", async (e) => {
+      const form = h("form", { class: "auth-form" }, fCur, fNew, err, go);
+      form.addEventListener("submit", (e) => {
         e.preventDefault();
-        const { data, error } = await sb.auth.updateUser({ password: iPass.value });
-        if (error) { err.textContent = error.message; return; }
-        const { data: s0 } = await sb.auth.getSession();
-        afterLogin(s0.session || { user: data.user });
+        busy(go, async () => {
+          await api("/api/password", { current: iCur.value, next: iNew.value });
+          authEl.hidden = true; document.body.classList.remove("locked");
+          toast("Password changed.");
+        });
       });
-      body = [h("h2", {}, "Choose a new password"), form];
+      body = [h("h2", {}, "Change your password"), form, h("p", { class: "auth-links" }, link("Cancel", () => { authEl.hidden = true; document.body.classList.remove("locked"); }))];
     } else if (mode === "claim") {
-      const [fName, iName] = field("Your name", { type: "text", value: (ME && ME.user_metadata && ME.user_metadata.name) || "" });
+      const [fName, iName] = field("Your name", { type: "text", value: ME.name || "" });
       const go = h("button", { class: "btn btn-primary", type: "button" }, "Set up as owner (Chairman)");
-      go.addEventListener("click", async () => {
-        go.disabled = true;
-        const { error } = await sb.rpc("claim_owner", { display_name: iName.value.trim() || ME.email });
-        if (error) { err.textContent = error.message; go.disabled = false; return; }
-        const { data } = await sb.auth.getSession();
-        afterLogin(data.session);
-      });
+      go.addEventListener("click", () => busy(go, async () => { const res = await api("/api/claim-owner", { name: iName.value.trim() }); await afterLogin(res.me); }));
       body = [h("h2", {}, "First-time setup"), h("p", {}, `Signed in as ${ME.email}. Nobody manages this system yet. The first person becomes the owner (the Chairman): they see everything and decide who else gets access.`), fName, err, go,
-        h("p", { class: "auth-links" }, link("Sign out", async () => { await sb.auth.signOut(); location.reload(); }))];
+        h("p", { class: "auth-links" }, link("Sign out", signOut))];
     } else if (mode === "waiting") {
       const again = h("button", { class: "btn btn-primary", type: "button" }, "Check again");
-      again.addEventListener("click", async () => { const { data } = await sb.auth.getSession(); afterLogin(data.session); });
+      again.addEventListener("click", () => busy(again, async () => { const res = await api("/api/me"); await afterLogin(res.me); }));
       body = [h("h2", {}, "Waiting for access"), h("p", {}, `You are signed in as ${ME.email}, but this email has no access yet. Ask the Chairman to add it in Team & access, then tap Check again.`), err, again,
-        h("p", { class: "auth-links" }, link("Sign out", async () => { await sb.auth.signOut(); location.reload(); }))];
+        h("p", { class: "auth-links" }, link("Sign out", signOut))];
     }
     authEl.replaceChildren(h("div", { class: "auth-card" }, head, ...body));
-    const first = $("input", authEl);
-    if (first) first.focus();
+    const firstInput = $("input", authEl);
+    if (firstInput) firstInput.focus();
   }
-  async function afterLogin(session) {
-    if (!session || !session.user) { showAuth("signin"); return; }
-    ME = session.user;
+  async function afterLogin(me) {
+    ME = me;
+    if (!me.role) { showAuth(me.hasOwner ? "waiting" : "claim"); return; }
     showAuth("loading");
-    try {
-      const { data: role, error } = await sb.rpc("my_role");
-      if (error) throw error;
-      if (!role) {
-        const { data: owned, error: e2 } = await sb.rpc("has_owner");
-        if (e2) throw e2;
-        showAuth(owned ? "waiting" : "claim");
-        return;
-      }
-      ROLE = role;
-      await loadAll();
-      if (!channel) channel = sb.channel("records-live").on("postgres_changes", { event: "*", schema: "public", table: "records" }, applyRemote).subscribe();
-      authEl.hidden = true;
-      document.body.classList.remove("locked");
-      applyRoleUI();
-      rebuildAll();
-      if (ROLE === "staff") { sheetUI.active = "balances"; setView("sheet", { scroll: false }); }
-      else setView(location.hash === "#sheet" ? "sheet" : "report", { scroll: false });
-    } catch (x) {
-      showAuth("signin", `Could not load the data: ${x.message || x}`);
-    }
+    ROLE = me.role;
+    await loadAll();
+    startPolling();
+    authEl.hidden = true;
+    document.body.classList.remove("locked");
+    applyRoleUI();
+    rebuildAll();
+    if (ROLE === "staff") { sheetUI.active = "balances"; setView("sheet", { scroll: false }); }
+    else setView(location.hash === "#sheet" ? "sheet" : "report", { scroll: false });
   }
   async function bootConnected() {
     document.body.classList.add("locked");
     applyRoleUI();
+    if (!TOKEN) { showAuth("signin"); return; }
     showAuth("loading");
     try {
-      if (!(window.supabase && window.supabase.createClient)) await loadScript("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.min.js", "Could not load the login tool. Check the internet connection and reload the page.");
-    } catch (x) { showAuth("error", x.message); return; }
-    sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } });
-    sb.auth.onAuthStateChange((event) => { if (event === "PASSWORD_RECOVERY") setTimeout(() => showAuth("newpass"), 0); });
-    const { data } = await sb.auth.getSession();
-    if (location.hash.includes("type=recovery")) return;
-    if (data.session) afterLogin(data.session); else showAuth("signin");
-    document.addEventListener("visibilitychange", async () => {
-      if (document.visibilityState !== "visible" || !ROLE || pending || syncing) return;
-      try { await loadAll(); queueRemoteRender(); } catch (x) { /* offline: keep what we have */ }
-    });
+      const res = await api("/api/me");
+      await afterLogin(res.me);
+    } catch (x) {
+      if (!x.quiet) showAuth("signin", `Could not reach the server: ${x.message || x}`);
+    }
   }
   async function renderTeam(host) {
     host.replaceChildren(h("div", { class: "sheet-head" }, h("h3", {}, "Team & access")), h("div", { class: "empty" }, "Loading…"));
-    const { data, error } = await sb.from("members").select("email,name,role").order("role").order("email");
-    if (error) { host.replaceChildren(h("div", { class: "empty" }, h("strong", {}, "Could not load the team. "), error.message)); return; }
+    let data;
+    try { data = await api("/api/members"); } catch (x) { host.replaceChildren(h("div", { class: "empty" }, h("strong", {}, "Could not load the team. "), x.message)); return; }
     const me = (ME.email || "").toLowerCase();
     const roleSelect = (value, disabled) => { const sel = h("select", { class: "select", disabled }, ["owner", "controller", "staff"].map((r) => h("option", { value: r }, ROLE_LABEL[r]))); sel.value = value; return sel; };
-    const iEmail = h("input", { class: "input", type: "email", placeholder: "name@example.com", "aria-label": "Email" });
     const iName = h("input", { class: "input", type: "text", placeholder: "Name", "aria-label": "Name" });
+    const iEmail = h("input", { class: "input", type: "email", placeholder: "name@example.com", "aria-label": "Email" });
     const iRole = roleSelect("staff", false);
     const add = h("button", { class: "btn btn-sm btn-primary", type: "button" }, icon("plus"), "Give access");
     add.addEventListener("click", async () => {
-      const email = iEmail.value.trim().toLowerCase();
-      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { toast("Type a valid email address."); return; }
-      const { error: e } = await sb.from("members").upsert({ email, name: iName.value.trim() || null, role: iRole.value });
-      if (e) { toast(e.message); return; }
-      toast(`${email} can now sign in. Send them the link; they tap "Create your account" with this email.`);
-      renderTeam(host);
+      try {
+        await api("/api/members", { email: iEmail.value.trim(), name: iName.value.trim(), role: iRole.value });
+        toast(`${iEmail.value.trim()} can now create an account. Send them the link; they tap "First time? Create your account".`);
+        renderTeam(host);
+      } catch (x) { toast(x.message); }
     });
-    const rows = (data || []).map((m) => {
+    const rows = (data.members || []).map((m) => {
       const self = m.email.toLowerCase() === me;
       const sel = roleSelect(m.role, self);
-      sel.addEventListener("change", async () => { const { error: e } = await sb.from("members").update({ role: sel.value }).eq("email", m.email); toast(e ? e.message : `${m.email} is now ${ROLE_LABEL[sel.value]}.`); });
-      const rm = h("button", { class: "btn btn-sm btn-ghost danger", type: "button", disabled: self }, "Remove");
-      rm.addEventListener("click", async () => {
-        if (!confirm(`Remove access for ${m.email}? They will no longer see anything.`)) return;
-        const { error: e } = await sb.from("members").delete().eq("email", m.email);
-        if (e) { toast(e.message); return; }
-        renderTeam(host);
-      });
-      return [h("strong", {}, m.name || "—"), m.email, sel, self ? h("span", { class: "muted" }, "You") : rm];
+      sel.addEventListener("change", async () => { try { await api("/api/members", { email: m.email, role: sel.value }); toast(`${m.email} is now ${ROLE_LABEL[sel.value]}.`); } catch (x) { toast(x.message); renderTeam(host); } });
+      const actions = h("div", { class: "rh-side" });
+      if (!self && m.hasAccount) {
+        const reset = h("button", { class: "btn btn-sm", type: "button" }, "Set password");
+        reset.addEventListener("click", async () => {
+          const pw = prompt(`New password for ${m.email} (at least 8 characters). Tell them the new password; they can change it after signing in.`);
+          if (!pw) return;
+          try { await api("/api/members/password", { email: m.email, password: pw }); toast(`New password set for ${m.email}.`); } catch (x) { toast(x.message); }
+        });
+        actions.append(reset);
+      }
+      if (!self) {
+        const rm = h("button", { class: "btn btn-sm btn-ghost danger", type: "button" }, "Remove");
+        rm.addEventListener("click", async () => {
+          if (!confirm(`Remove access for ${m.email}? They will no longer see anything.`)) return;
+          try { await api("/api/members/delete", { email: m.email }); renderTeam(host); } catch (x) { toast(x.message); }
+        });
+        actions.append(rm);
+      }
+      return [h("strong", {}, m.name || "—"), m.email, sel, m.hasAccount ? badge("Account created", "good") : badge("Not signed up yet", "warning"), self ? h("span", { class: "muted" }, "You") : actions];
     });
     host.replaceChildren(
       h("div", { class: "sheet-head" }, h("h3", {}, "Team & access"), h("span", { class: "count" }, `${num(rows.length)} people`)),
       h("div", { class: "team-add" }, iName, iEmail, iRole, add),
-      table({ head: ["Name", "Email", "Access", ""], rows }),
-      h("div", { class: "sheet-foot" }, "Chairman (owner): sees everything and manages access. Finance controller: sees and edits everything. Finance staff: only the data sheets they fill in, never reports, personal cash, salaries or staff reviews."));
+      table({ head: ["Name", "Email", "Access", "Status", ""], rows }),
+      h("div", { class: "sheet-foot" }, "Chairman (owner): sees everything and manages access. Finance controller: sees and edits everything. Finance staff: only the data sheets they fill in, never reports, personal cash, salaries or staff reviews. Forgotten password: use Set password and tell the person the new one."));
   }
 
   /* ---------- view switching & wiring ---------- */

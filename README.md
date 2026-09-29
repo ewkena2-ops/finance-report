@@ -18,9 +18,29 @@ Reporting system for the group finance controller: nine reports with fixed deadl
 
 The **Deadlines & status** view shows whether each report was sent on time, from the "Mark as sent" log. **Compensation & accountability** applies the bonus rules to that log, the incidents and missed loan/tax deadlines.
 
-## Privacy
+## Login, roles and privacy
 
-All figures are entered in the **Data sheet** and saved **only on the device** (browser storage). Nothing is uploaded, and this site has no "publish data" button. Back up with **Export Excel** and send reports as **PDF**. Salary and bonus amounts are private settings; they are never stored in this repository.
+Figures are shared online through a small server on Cloudflare (Worker + D1 database, free plan). Everyone signs in with email and password.
+
+| Role | Who | Sees | Can change |
+|---|---|---|---|
+| Owner | Chairman | Everything | Everything, and who has access (**Team & access**) |
+| Controller | Kidan | Everything | All figures and settings |
+| Staff | Selam, Sabella, Rahel | Only the company data sheets they fill in | Balances, transactions, forecast, reconciliation items, monthly results |
+
+Staff never see reports, personal cash, salaries/bonuses or staff reviews. The server enforces this, not only the page.
+
+**First start:** the Chairman opens the page, taps *First time? Create your account*, then *Set up as owner*. In **Team & access** he adds each person's email and role. They then create their own account with that email. A forgotten password is reset by the Chairman (*Set password*).
+
+Salary and bonus amounts are private settings stored on the server; they are never in this repository. This site has no "publish data" button. Back up with **Export Excel** and send reports as **PDF**.
+
+To use the page on one device only (no login), leave `apiUrl` empty in `config.js`.
+
+### Server
+
+- API: https://klever-finance-api.ewkena2.workers.dev (code in `server/src/worker.js`, tables in `server/schema.sql`)
+- Deploy: `cd server && npx wrangler deploy`
+- Passwords are stored as salted PBKDF2 hashes; login tokens are stored hashed; wrong passwords are rate limited.
 
 ## Data sheet
 

@@ -1,0 +1,12 @@
+name = "klever-finance-api"
+main = "src/worker.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "klever-finance"
+database_id = "ce29b422-6af5-44ba-915c-e06e569733ce"
+
+[observability]
+enabled = true
