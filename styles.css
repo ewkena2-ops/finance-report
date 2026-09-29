@@ -670,6 +670,7 @@ body:not([data-view="sheet"]) .sheet-view { display: none; }
 .sheet-bar { display: flex; }
 .sheet-tabs { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
 .sheet-tabs::-webkit-scrollbar { display: none; }
+@media (min-width: 761px) { .sheet-tabs { flex-wrap: wrap; overflow-x: visible; } } /* show every tab on wide screens */
 .sheet-tabs button .cnt { margin-left: 6px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .sheet-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 

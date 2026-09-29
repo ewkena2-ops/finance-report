@@ -1517,16 +1517,23 @@
   const TOKEN_KEY = "gf-session";
   let TOKEN = null, REV = 0, pollTimer = 0;
   let snap = new Map(), setSnap = { general: "", private: "" };
-  let syncTimer = 0, syncing = false, syncAgain = false, pending = false;
+  let syncTimer = 0, retryTimer = 0, syncing = false, syncAgain = false, pending = false;
   const keyOf = (ds, rid) => `${ds}\u0000${rid}`;
   try { TOKEN = localStorage.getItem(TOKEN_KEY); } catch (e) { /* storage blocked */ }
   function saveToken(t) { TOKEN = t; try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ } }
   async function api(path, body) {
-    const res = await fetch(String(CFG.apiUrl).replace(/\/+$/, "") + path, {
-      method: body ? "POST" : "GET",
-      headers: { "Content-Type": "application/json", ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 20000);
+    let res;
+    try {
+      res = await fetch(String(CFG.apiUrl).replace(/\/+$/, "") + path, {
+        method: body ? "POST" : "GET",
+        headers: { "Content-Type": "application/json", ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: ctl.signal,
+      });
+    } catch (e) {
+      throw new Error(e.name === "AbortError" ? "The server did not answer in time" : "No internet connection");
+    } finally { clearTimeout(timer); }
     let data = null;
     try { data = await res.json(); } catch (e) { /* empty body */ }
     if (res.status === 401 && TOKEN && path !== "/api/login") {
@@ -1600,7 +1607,9 @@
       if (e.quiet) return;
       console.error(e);
       setSyncState("error", e.message || String(e));
-      toast(`Not saved online (${e.message || e}). Check the internet connection.`, { label: "Try again", run: () => scheduleSync() });
+      toast(`Not saved online (${e.message || e}). It will try again by itself.`, { label: "Try now", run: () => scheduleSync() });
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(() => { if (pending) scheduleSync(); }, 15000);
     } finally {
       syncing = false;
       if (syncAgain) { syncAgain = false; scheduleSync(); }
@@ -1754,7 +1763,7 @@
     if (!me.role) { showAuth(me.hasOwner ? "waiting" : "claim"); return; }
     showAuth("loading");
     ROLE = me.role;
-    await loadAll();
+    try { await loadAll(); } catch (x) { if (!x.quiet) showAuth("error", `Could not load the records: ${x.message || x}.`); return; }
     startPolling();
     authEl.hidden = true;
     document.body.classList.remove("locked");
