@@ -30,7 +30,7 @@ Figures are shared online through a small server on Cloudflare (Worker + D1 data
 
 Staff never see reports, personal cash, salaries/bonuses or staff reviews. The server enforces this, not only the page.
 
-**First start:** the Chairman opens the page, taps *First time? Create your account*, then *Set up as owner*. In **Team & access** he adds each person's email and role. They then create their own account with that email. A forgotten password is reset by the Chairman (*Set password*).
+**Adding people:** there is no self sign-up. The Chairman opens **Data sheet → Team & access**, types the person's name, a login (e.g. `selam@klever.local`, it does not need to be a real email) and a password, picks the role and taps *Give access*, then sends the person the link, login and password. A forgotten password is reset there with *Set password*. Removing a person also deletes their login.
 
 Salary and bonus amounts are private settings stored on the server; they are never in this repository. This site has no "publish data" button. Back up with **Export Excel** and send reports as **PDF**.
 
