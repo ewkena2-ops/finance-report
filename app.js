@@ -98,8 +98,19 @@
     for (const k of DATASETS) if (!Array.isArray(out[k])) out[k] = [];
     return out;
   }
+  // Online mode: when config.js names a Supabase project, figures are shared and need a login
+  const CFG = window.FINANCE_CONFIG || {};
+  const CONNECTED = !!(CFG.supabaseUrl && CFG.supabaseAnonKey);
+  const STAFF_SHEETS = ["accounts", "balances", "transactions", "forecast", "reconItems", "monthly"];
+  const STAFF_WRITE = ["balances", "transactions", "forecast", "reconItems", "monthly"];
+  const PRIVATE_KEYS = ["fixedPay", "complianceBonus", "accuracyBonus"];
+  const ROLE_LABEL = { owner: "Chairman (owner)", controller: "Finance controller", staff: "Finance staff" };
+  let sb = null, ROLE = null, ME = null;
+  const canSee = (id) => ROLE !== "staff" || STAFF_SHEETS.includes(id);
+  const canWrite = (id) => !CONNECTED || ROLE === "owner" || ROLE === "controller" || STAFF_WRITE.includes(id);
   let LOCAL = false;
   function loadData() {
+    if (CONNECTED) return normalize({});
     try {
       const raw = localStorage.getItem(STORE_KEY);
       if (raw) { LOCAL = true; return normalize(JSON.parse(raw)); }
@@ -111,6 +122,7 @@
   let dirty = false;
   function saveData() {
     LOCAL = true; dirty = true;
+    if (CONNECTED) { scheduleSync(); return; }
     try { localStorage.setItem(STORE_KEY, JSON.stringify(D)); } catch (e) { toast("Could not save on this device (storage is blocked). Export to Excel to keep your changes."); }
   }
 
@@ -916,7 +928,9 @@
     openSheet.addEventListener("click", () => setView("sheet"));
     const empty = DATASETS.every((k) => !D[k].length);
     let msg = null;
-    if (empty) msg = [h("strong", {}, "No figures yet. "), "Start in the Data sheet: add bank accounts, then daily balances, transactions and expected items. Or tap Try example data to see all nine reports."];
+    if (CONNECTED && !empty) { el.hidden = true; return; }
+    if (CONNECTED) msg = [h("strong", {}, "No figures yet. "), "Start in the Data sheet: add bank accounts, then daily balances every morning. Everything you type saves online for the people who have access."];
+    else if (empty) msg = [h("strong", {}, "No figures yet. "), "Start in the Data sheet: add bank accounts, then daily balances, transactions and expected items. Or tap Try example data to see all nine reports."];
     else if (D.sample) msg = [h("strong", {}, "Example data. "), "These figures are made up. Clear them with Start empty in the Data sheet."];
     else msg = [h("strong", {}, "Private: saved on this device only. "), "Nothing is uploaded. Back up with Export Excel and send reports as PDF."];
     el.className = `notice report-only${D.sample || empty ? "" : " local"}`;
@@ -934,7 +948,7 @@
   const cMonth = () => col("month", "Month", "month", 150);
   const cAmt = (key = "amount", label = "Amount", w = 140) => col(key, label, "number", w);
   const cNote = (w = 200) => col("note", "Note", "text", w);
-  const cCompany = (withPersonal = true) => col("company", "Company", "select", 140, { options: () => [...companyList(), ...(withPersonal ? ["Personal"] : [])] });
+  const cCompany = (withPersonal = true) => col("company", "Company", "select", 140, { options: () => [...companyList(), ...(withPersonal && ROLE !== "staff" ? ["Personal"] : [])] });
   const cAccount = () => col("account", "Account", "select", 260, { options: () => ["", ...D.accounts.map(accLabel)] });
   const optsOf = (c) => (typeof c.options === "function" ? c.options() : c.options);
   const SHEETS = [
@@ -1016,6 +1030,7 @@
     return t;
   }
   function nextId(def) {
+    if (CONNECTED) return `${def.prefix}${todayISO().slice(2).replace(/-/g, "")}-${Math.random().toString(36).slice(2, 6)}`;
     let max = 0, width = 3;
     for (const r of D[def.id]) { const m = String(r.id || "").match(/(\d+)\s*$/); if (m) { max = Math.max(max, +m[1]); width = Math.max(width, m[1].length); } }
     return `${def.prefix}${String(max + 1).padStart(width, "0")}`;
@@ -1036,7 +1051,9 @@
     return uniq(rows.map((r) => r[c.key]));
   }
   function renderSheetTabs() {
-    const all = [...SHEETS.map((d) => ({ id: d.id, label: d.label, count: D[d.id].length })), { id: "settings", label: "Settings" }];
+    const all = [...SHEETS.filter((d) => canSee(d.id)).map((d) => ({ id: d.id, label: d.label, count: D[d.id].length })),
+      ...(ROLE !== "staff" ? [{ id: "settings", label: "Settings" }] : []), ...(CONNECTED && ROLE === "owner" ? [{ id: "team", label: "Team & access" }] : [])];
+    if (!all.some((t) => t.id === sheetUI.active)) sheetUI.active = all[0].id;
     $("#sheet-tabs").replaceChildren(...all.map((t) => {
       const b = h("button", { type: "button", role: "tab", "aria-selected": String(t.id === sheetUI.active), "aria-pressed": String(t.id === sheetUI.active) }, t.label, t.count != null ? h("span", { class: "cnt" }, num(t.count)) : null);
       b.addEventListener("click", () => { sheetUI.active = t.id; sheetUI.q = ""; renderSheetTabs(); renderSheet(); });
@@ -1044,6 +1061,14 @@
     }));
   }
   function renderSheetNotice() {
+    if (CONNECTED) {
+      $("#sheet-notice").className = "notice";
+      $("#sheet-notice").replaceChildren(icon("info"), h("div", { class: "grow" },
+        h("strong", {}, "Connected. "), "Changes save online and appear for everyone with access. ",
+        ROLE === "staff" ? "You can add daily balances, transactions, forecast items, reconciliation items and monthly results. Accounts are read-only. Reports go to the Chairman."
+          : ["Start with ", h("strong", {}, "Accounts"), ", then add ", h("strong", {}, "Daily balances"), " every morning."]));
+      return;
+    }
     $("#sheet-notice").className = "notice local";
     $("#sheet-notice").replaceChildren(icon("info"), h("div", { class: "grow" },
       h("strong", {}, "Private: saved on this device only. "), "These figures are never uploaded. Back up with ", h("strong", {}, "Export Excel"),
@@ -1053,8 +1078,10 @@
     renderSheetNotice();
     const host = $("#sheet-body");
     if (sheetUI.active === "settings") { renderSettings(host); return; }
+    if (sheetUI.active === "team") { renderTeam(host); return; }
     const def = SHEETS.find((d) => d.id === sheetUI.active);
     const rows = D[def.id];
+    const ro = !canWrite(def.id);
     const search = h("input", { class: "input", type: "search", placeholder: `Search ${def.label.toLowerCase()}`, "aria-label": `Search ${def.label}`, value: sheetUI.q });
     const count = h("span", { class: "count" });
     const add = h("button", { class: "btn btn-sm btn-primary", type: "button" }, icon("plus"), "Add row");
@@ -1067,7 +1094,7 @@
       count.textContent = q ? `${num(visible.length)} of ${num(rows.length)} rows` : `${num(rows.length)} rows`;
       if (!rows.length) { gridWrap.replaceChildren(h("div", { class: "sheet-empty" }, h("strong", {}, `No ${def.label.toLowerCase()} yet. `), "Tap Add row, or import an Excel/CSV file.")); return; }
       const thead = h("thead", {}, h("tr", {}, h("th", { class: "rn", scope: "col" }, "#"), def.cols.map((c) => h("th", { class: c.type === "number" ? "num" : null, scope: "col", style: `min-width:${c.w}px` }, c.label)), h("th", { scope: "col" }, h("span", { class: "sr-only" }, "Delete"))));
-      gridWrap.replaceChildren(h("table", { class: "sheet-grid" }, thead, h("tbody", {}, visible.map(([r, i]) => sheetRow(def, r, i)))));
+      gridWrap.replaceChildren(h("table", { class: "sheet-grid" }, thead, h("tbody", {}, visible.map(([r, i]) => sheetRow(def, r, i, ro)))));
     };
     search.addEventListener("input", () => { sheetUI.q = search.value.trim(); drawGrid(); });
     add.addEventListener("click", () => {
@@ -1079,11 +1106,11 @@
       const target = last && ($$(".cell", last).find((c) => c.dataset.key !== "id" && !["date", "time", "month"].includes(c.type)) || $$(".cell", last)[1]);
       if (target) target.focus();
     });
-    host.replaceChildren(h("div", { class: "sheet-head" }, h("h3", {}, def.label), count, h("span", { class: "dt-spacer" }), h("div", { class: "dt-search" }, icon("search"), search), add),
+    host.replaceChildren(h("div", { class: "sheet-head" }, h("h3", {}, def.label), ro ? badge("Read-only") : null, count, h("span", { class: "dt-spacer" }), h("div", { class: "dt-search" }, icon("search"), search), ro ? null : add),
       gridWrap, h("div", { class: "sheet-foot" }, "Tip: press Enter to move down a column. Numbers without commas (a minus sign for negatives); dates as day / month / year."), datalists);
     drawGrid();
   }
-  function sheetRow(def, r, index) {
+  function sheetRow(def, r, index, ro = false) {
     const tr = h("tr", {});
     tr.append(h("td", { class: "rn" }, String(index + 1)));
     def.cols.forEach((c, ci) => {
@@ -1102,6 +1129,7 @@
         input = h("input", { class: "cell", type: "text", "aria-label": label, value: r[c.key] ?? "", list: c.suggest || c.suggestList ? `dl-${def.id}-${c.key}` : null });
       }
       input.dataset.col = String(ci); input.dataset.key = c.key;
+      if (ro) input.disabled = true;
       input.addEventListener("change", () => {
         const v = coerce(c, input.value);
         r[c.key] = v;
@@ -1125,7 +1153,7 @@
       arr.splice(at, 1); saveData(); renderSheet(); renderSheetTabs();
       toast(`Row deleted from ${def.label}.`, { label: "Undo", run: () => { arr.splice(at, 0, r); saveData(); renderSheet(); renderSheetTabs(); } });
     });
-    tr.append(h("td", {}, del));
+    tr.append(h("td", {}, ro ? null : del));
     return tr;
   }
   function renderSettings(host) {
@@ -1481,8 +1509,318 @@
     try { await fn(); toast("PDF downloaded."); } catch (e) { console.error(e); toast(e.message || "Could not create the PDF."); } finally { btn.disabled = false; btn.replaceChildren(...kids); }
   }
 
+  /* ==========================================================================
+     ONLINE MODE — Supabase login, shared data, live updates
+     ========================================================================== */
+  const authEl = $("#auth");
+  let snap = new Map(), setSnap = { general: "", private: "" };
+  let syncTimer = 0, syncing = false, syncAgain = false, pending = false, channel = null;
+  const keyOf = (ds, rid) => `${ds}\u0000${rid}`;
+  function isPersonalRec(ds, r) {
+    if (ds === "accounts") return r.type === "Personal" || r.company === "Personal";
+    if (r.company === "Personal") return true;
+    if (r.account) { const a = D.accounts.find((x) => accLabel(x) === r.account); if (a && (a.type === "Personal" || a.company === "Personal")) return true; }
+    return false;
+  }
+  function splitSettings() {
+    const general = {}, priv = {};
+    for (const [k, v] of Object.entries(D.company)) (PRIVATE_KEYS.includes(k) ? priv : general)[k] = v;
+    return { general, priv };
+  }
+  function takeSnapshot() {
+    snap = new Map();
+    for (const ds of DATASETS) for (const r of D[ds]) snap.set(keyOf(ds, r.id), JSON.stringify(r));
+    const { general, priv } = splitSettings();
+    setSnap = { general: JSON.stringify(general), private: JSON.stringify(priv) };
+  }
+  function setSyncState(st, detail) {
+    const el = $("#sync-state");
+    if (!el) return;
+    el.className = `sync-state ${st}`;
+    el.replaceChildren(icon(st === "saved" ? "check" : st === "saving" ? "clock" : "alertCircle"), st === "saved" ? "Saved" : st === "saving" ? "Saving…" : "Not saved");
+    el.title = detail || (st === "saved" ? "All changes are saved online" : "");
+  }
+  function scheduleSync() {
+    if (!sb || !ROLE) return;
+    pending = true;
+    setSyncState("saving");
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(syncNow, 500);
+  }
+  async function syncNow() {
+    if (syncing) { syncAgain = true; return; }
+    syncing = true;
+    try {
+      const up = [], seen = new Set();
+      for (const ds of DATASETS) {
+        if (!canWrite(ds)) { for (const r of D[ds]) seen.add(keyOf(ds, r.id)); continue; }
+        for (const r of D[ds]) {
+          if (!r.id) r.id = nextId(SHEETS.find((d) => d.id === ds) || { prefix: "X-" });
+          const k = keyOf(ds, r.id);
+          seen.add(k);
+          const json = JSON.stringify(r);
+          if (snap.get(k) !== json) up.push({ dataset: ds, rid: r.id, data: r, personal: isPersonalRec(ds, r), json });
+        }
+      }
+      for (let i = 0; i < up.length; i += 500) {
+        const chunk = up.slice(i, i + 500);
+        const { error } = await sb.from("records").upsert(chunk.map(({ json, ...row }) => row), { onConflict: "dataset,rid" });
+        if (error) throw error;
+        chunk.forEach((u) => snap.set(keyOf(u.dataset, u.rid), u.json));
+      }
+      const byDs = {};
+      [...snap.keys()].filter((k) => !seen.has(k)).forEach((k) => { const [ds, rid] = k.split("\u0000"); (byDs[ds] = byDs[ds] || []).push(rid); });
+      for (const [ds, rids] of Object.entries(byDs)) {
+        for (let i = 0; i < rids.length; i += 200) {
+          const part = rids.slice(i, i + 200);
+          const { error } = await sb.from("records").delete().eq("dataset", ds).in("rid", part);
+          if (error) throw error;
+          part.forEach((rid) => snap.delete(keyOf(ds, rid)));
+        }
+      }
+      if (ROLE === "owner" || ROLE === "controller") {
+        const { general, priv } = splitSettings();
+        const g = JSON.stringify(general), p = JSON.stringify(priv), rows = [];
+        if (g !== setSnap.general) rows.push({ id: "general", data: general });
+        if (p !== setSnap.private) rows.push({ id: "private", data: priv });
+        if (rows.length) {
+          const { error } = await sb.from("settings").upsert(rows);
+          if (error) throw error;
+          setSnap = { general: g, private: p };
+        }
+      }
+      pending = false;
+      setSyncState("saved");
+    } catch (e) {
+      console.error(e);
+      setSyncState("error", e.message || String(e));
+      toast(`Not saved online (${e.message || e}). Check the internet connection.`, { label: "Try again", run: () => scheduleSync() });
+    } finally {
+      syncing = false;
+      if (syncAgain) { syncAgain = false; scheduleSync(); }
+    }
+  }
+  async function loadAll() {
+    const rows = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await sb.from("records").select("dataset,rid,data").order("dataset").order("rid").range(from, from + 999);
+      if (error) throw error;
+      rows.push(...data);
+      if (data.length < 1000) break;
+    }
+    const { data: sets, error: e2 } = await sb.from("settings").select("id,data");
+    if (e2) throw e2;
+    const d = { company: {} };
+    for (const k of DATASETS) d[k] = [];
+    for (const r of rows) if (d[r.dataset]) d[r.dataset].push({ ...r.data, id: r.rid });
+    for (const x of sets || []) Object.assign(d.company, x.data || {});
+    D = normalize(d);
+    D.sample = false;
+    takeSnapshot();
+  }
+  let renderQueued = false;
+  function queueRemoteRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    const run = () => {
+      const a = document.activeElement;
+      if (a && a.classList && a.classList.contains("cell")) { a.addEventListener("blur", () => setTimeout(run, 60), { once: true }); return; }
+      renderQueued = false;
+      if (document.body.dataset.view === "sheet") { renderSheetTabs(); renderSheet(); dirty = true; } else rebuildAll();
+    };
+    setTimeout(run, 300);
+  }
+  function applyRemote(p) {
+    const row = p.eventType === "DELETE" ? p.old : p.new;
+    if (!row || !D[row.dataset]) return;
+    const ds = row.dataset, rid = row.rid, k = keyOf(ds, rid), arr = D[ds];
+    const at = arr.findIndex((x) => x.id === rid);
+    if (p.eventType === "DELETE") {
+      if (at < 0) return;
+      arr.splice(at, 1);
+      snap.delete(k);
+    } else {
+      const rec = { ...row.data, id: rid }, json = JSON.stringify(rec);
+      if (snap.get(k) === json) return;
+      if (at >= 0) arr[at] = rec; else arr.push(rec);
+      snap.set(k, json);
+    }
+    queueRemoteRender();
+  }
+  function renderAccountChip() {
+    const el = $("#account-chip");
+    if (!CONNECTED || !ROLE) { el.hidden = true; return; }
+    const name = (ME && ME.user_metadata && ME.user_metadata.name) || (ME && ME.email) || "";
+    const out = h("button", { class: "btn btn-sm btn-ghost", type: "button", title: "Sign out" }, "Sign out");
+    out.addEventListener("click", async () => { await sb.auth.signOut(); location.reload(); });
+    el.replaceChildren(h("span", { class: "sync-state saved", id: "sync-state" }), h("span", { class: "who" }, h("strong", {}, name), h("span", {}, ROLE_LABEL[ROLE] || ROLE)), out);
+    el.hidden = false;
+    setSyncState(pending ? "saving" : "saved");
+  }
+  function applyRoleUI() {
+    document.body.dataset.role = CONNECTED ? ROLE || "none" : "local";
+    $("#load-example").hidden = CONNECTED;
+    $("#clear-all").hidden = CONNECTED;
+    $("#import-btn").hidden = CONNECTED && !["owner", "controller"].includes(ROLE);
+    renderAccountChip();
+  }
+  function showAuth(mode, message) {
+    document.body.classList.add("locked");
+    authEl.hidden = false;
+    const err = h("p", { class: "auth-error", role: "alert" }, message || "");
+    const field = (label, attrs) => { const i = h("input", { class: "input", ...attrs }); return [h("label", { class: "field" }, h("span", {}, label), i), i]; };
+    const head = h("div", { class: "auth-head" }, h("span", { class: "brand-mark", "aria-hidden": "true" }, icon("bank")), h("div", {}, h("strong", {}, C.name || "Group"), h("span", {}, "Group Finance Reporting")));
+    const link = (text, fn) => { const b = h("button", { class: "linkish", type: "button" }, text); b.addEventListener("click", fn); return b; };
+    let body = [];
+    if (mode === "loading") body = [h("p", { class: "muted" }, "Loading…")];
+    else if (mode === "error") body = [h("p", {}, message || "Something went wrong.")];
+    else if (mode === "signin" || mode === "signup") {
+      const [fName, iName] = field("Your name", { type: "text", autocomplete: "name" });
+      const [fEmail, iEmail] = field("Email", { type: "email", autocomplete: "email", required: true });
+      const [fPass, iPass] = field("Password", { type: "password", autocomplete: mode === "signin" ? "current-password" : "new-password", required: true, minlength: 8 });
+      const go = h("button", { class: "btn btn-primary", type: "submit" }, mode === "signin" ? "Sign in" : "Create account");
+      const form = h("form", { class: "auth-form" }, mode === "signup" ? fName : null, fEmail, fPass, err, go);
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        go.disabled = true; err.textContent = "";
+        try {
+          const email = iEmail.value.trim().toLowerCase(), password = iPass.value;
+          const res = mode === "signin" ? await sb.auth.signInWithPassword({ email, password })
+            : await sb.auth.signUp({ email, password, options: { data: { name: iName.value.trim() } } });
+          if (res.error) throw res.error;
+          if (!res.data.session) { showAuth("signin", "Account created. Check your email to confirm it, then sign in."); return; }
+          afterLogin(res.data.session);
+        } catch (x) { err.textContent = x.message || String(x); go.disabled = false; }
+      });
+      body = [h("h2", {}, mode === "signin" ? "Sign in" : "Create your account"),
+        h("p", { class: "muted" }, mode === "signin" ? "Use the email the Chairman gave access to." : "Use the email the Chairman added in Team & access. Choose a password of at least 8 characters."),
+        form,
+        h("p", { class: "auth-links" }, mode === "signin"
+          ? [link("First time? Create your account", () => showAuth("signup")), " · ", link("Forgot password?", async () => {
+            const email = iEmail.value.trim();
+            if (!email) { err.textContent = "Type your email first."; return; }
+            const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
+            err.textContent = error ? error.message : "If that email has an account, a reset link is on its way.";
+          })]
+          : link("I already have an account", () => showAuth("signin")))];
+    } else if (mode === "newpass") {
+      const [fPass, iPass] = field("New password", { type: "password", autocomplete: "new-password", minlength: 8 });
+      const go = h("button", { class: "btn btn-primary", type: "submit" }, "Save new password");
+      const form = h("form", { class: "auth-form" }, fPass, err, go);
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const { data, error } = await sb.auth.updateUser({ password: iPass.value });
+        if (error) { err.textContent = error.message; return; }
+        const { data: s0 } = await sb.auth.getSession();
+        afterLogin(s0.session || { user: data.user });
+      });
+      body = [h("h2", {}, "Choose a new password"), form];
+    } else if (mode === "claim") {
+      const [fName, iName] = field("Your name", { type: "text", value: (ME && ME.user_metadata && ME.user_metadata.name) || "" });
+      const go = h("button", { class: "btn btn-primary", type: "button" }, "Set up as owner (Chairman)");
+      go.addEventListener("click", async () => {
+        go.disabled = true;
+        const { error } = await sb.rpc("claim_owner", { display_name: iName.value.trim() || ME.email });
+        if (error) { err.textContent = error.message; go.disabled = false; return; }
+        const { data } = await sb.auth.getSession();
+        afterLogin(data.session);
+      });
+      body = [h("h2", {}, "First-time setup"), h("p", {}, `Signed in as ${ME.email}. Nobody manages this system yet. The first person becomes the owner (the Chairman): they see everything and decide who else gets access.`), fName, err, go,
+        h("p", { class: "auth-links" }, link("Sign out", async () => { await sb.auth.signOut(); location.reload(); }))];
+    } else if (mode === "waiting") {
+      const again = h("button", { class: "btn btn-primary", type: "button" }, "Check again");
+      again.addEventListener("click", async () => { const { data } = await sb.auth.getSession(); afterLogin(data.session); });
+      body = [h("h2", {}, "Waiting for access"), h("p", {}, `You are signed in as ${ME.email}, but this email has no access yet. Ask the Chairman to add it in Team & access, then tap Check again.`), err, again,
+        h("p", { class: "auth-links" }, link("Sign out", async () => { await sb.auth.signOut(); location.reload(); }))];
+    }
+    authEl.replaceChildren(h("div", { class: "auth-card" }, head, ...body));
+    const first = $("input", authEl);
+    if (first) first.focus();
+  }
+  async function afterLogin(session) {
+    if (!session || !session.user) { showAuth("signin"); return; }
+    ME = session.user;
+    showAuth("loading");
+    try {
+      const { data: role, error } = await sb.rpc("my_role");
+      if (error) throw error;
+      if (!role) {
+        const { data: owned, error: e2 } = await sb.rpc("has_owner");
+        if (e2) throw e2;
+        showAuth(owned ? "waiting" : "claim");
+        return;
+      }
+      ROLE = role;
+      await loadAll();
+      if (!channel) channel = sb.channel("records-live").on("postgres_changes", { event: "*", schema: "public", table: "records" }, applyRemote).subscribe();
+      authEl.hidden = true;
+      document.body.classList.remove("locked");
+      applyRoleUI();
+      rebuildAll();
+      if (ROLE === "staff") { sheetUI.active = "balances"; setView("sheet", { scroll: false }); }
+      else setView(location.hash === "#sheet" ? "sheet" : "report", { scroll: false });
+    } catch (x) {
+      showAuth("signin", `Could not load the data: ${x.message || x}`);
+    }
+  }
+  async function bootConnected() {
+    document.body.classList.add("locked");
+    applyRoleUI();
+    showAuth("loading");
+    try {
+      if (!(window.supabase && window.supabase.createClient)) await loadScript("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.min.js", "Could not load the login tool. Check the internet connection and reload the page.");
+    } catch (x) { showAuth("error", x.message); return; }
+    sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } });
+    sb.auth.onAuthStateChange((event) => { if (event === "PASSWORD_RECOVERY") setTimeout(() => showAuth("newpass"), 0); });
+    const { data } = await sb.auth.getSession();
+    if (location.hash.includes("type=recovery")) return;
+    if (data.session) afterLogin(data.session); else showAuth("signin");
+    document.addEventListener("visibilitychange", async () => {
+      if (document.visibilityState !== "visible" || !ROLE || pending || syncing) return;
+      try { await loadAll(); queueRemoteRender(); } catch (x) { /* offline: keep what we have */ }
+    });
+  }
+  async function renderTeam(host) {
+    host.replaceChildren(h("div", { class: "sheet-head" }, h("h3", {}, "Team & access")), h("div", { class: "empty" }, "Loading…"));
+    const { data, error } = await sb.from("members").select("email,name,role").order("role").order("email");
+    if (error) { host.replaceChildren(h("div", { class: "empty" }, h("strong", {}, "Could not load the team. "), error.message)); return; }
+    const me = (ME.email || "").toLowerCase();
+    const roleSelect = (value, disabled) => { const sel = h("select", { class: "select", disabled }, ["owner", "controller", "staff"].map((r) => h("option", { value: r }, ROLE_LABEL[r]))); sel.value = value; return sel; };
+    const iEmail = h("input", { class: "input", type: "email", placeholder: "name@example.com", "aria-label": "Email" });
+    const iName = h("input", { class: "input", type: "text", placeholder: "Name", "aria-label": "Name" });
+    const iRole = roleSelect("staff", false);
+    const add = h("button", { class: "btn btn-sm btn-primary", type: "button" }, icon("plus"), "Give access");
+    add.addEventListener("click", async () => {
+      const email = iEmail.value.trim().toLowerCase();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { toast("Type a valid email address."); return; }
+      const { error: e } = await sb.from("members").upsert({ email, name: iName.value.trim() || null, role: iRole.value });
+      if (e) { toast(e.message); return; }
+      toast(`${email} can now sign in. Send them the link; they tap "Create your account" with this email.`);
+      renderTeam(host);
+    });
+    const rows = (data || []).map((m) => {
+      const self = m.email.toLowerCase() === me;
+      const sel = roleSelect(m.role, self);
+      sel.addEventListener("change", async () => { const { error: e } = await sb.from("members").update({ role: sel.value }).eq("email", m.email); toast(e ? e.message : `${m.email} is now ${ROLE_LABEL[sel.value]}.`); });
+      const rm = h("button", { class: "btn btn-sm btn-ghost danger", type: "button", disabled: self }, "Remove");
+      rm.addEventListener("click", async () => {
+        if (!confirm(`Remove access for ${m.email}? They will no longer see anything.`)) return;
+        const { error: e } = await sb.from("members").delete().eq("email", m.email);
+        if (e) { toast(e.message); return; }
+        renderTeam(host);
+      });
+      return [h("strong", {}, m.name || "—"), m.email, sel, self ? h("span", { class: "muted" }, "You") : rm];
+    });
+    host.replaceChildren(
+      h("div", { class: "sheet-head" }, h("h3", {}, "Team & access"), h("span", { class: "count" }, `${num(rows.length)} people`)),
+      h("div", { class: "team-add" }, iName, iEmail, iRole, add),
+      table({ head: ["Name", "Email", "Access", ""], rows }),
+      h("div", { class: "sheet-foot" }, "Chairman (owner): sees everything and manages access. Finance controller: sees and edits everything. Finance staff: only the data sheets they fill in, never reports, personal cash, salaries or staff reviews."));
+  }
+
   /* ---------- view switching & wiring ---------- */
   function setView(v, { scroll = true } = {}) {
+    if (ROLE === "staff") v = "sheet";
     document.body.dataset.view = v;
     $$("#view-seg button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === v)));
     $$("#nav a").forEach((a) => a.classList.toggle("active", v === "sheet" ? a.classList.contains("nav-sheet") : a.getAttribute("href") === "#overview"));
@@ -1576,5 +1914,6 @@
   state.month = defaultMonth(state.date);
   initOnce();
   rebuildAll();
-  setView(location.hash === "#sheet" ? "sheet" : "report", { scroll: false });
+  if (CONNECTED) bootConnected();
+  else { applyRoleUI(); setView(location.hash === "#sheet" ? "sheet" : "report", { scroll: false }); }
 })();

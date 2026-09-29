@@ -848,3 +848,37 @@ a.link:hover { color: var(--accent-ink); text-decoration: underline; }
   .nav-group { margin-top: 8px; }
   .sidebar-foot { padding-top: 10px; }
 }
+
+
+/* ==========================================================================
+   Online mode: login, account chip, roles
+   ========================================================================== */
+body.locked .app { filter: blur(6px); pointer-events: none; user-select: none; }
+.auth { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; padding: 16px; background: color-mix(in srgb, var(--page) 72%, transparent); overflow-y: auto; }
+.auth-card { width: min(420px, 100%); background: var(--surface); border: 1px solid var(--border); border-radius: 18px; box-shadow: 0 24px 60px -24px rgba(0, 0, 0, .35); padding: 24px; display: grid; gap: 14px; }
+.auth-head { display: flex; align-items: center; gap: 12px; }
+.auth-head .brand-mark svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; }
+.auth-head div { display: grid; line-height: 1.3; }
+.auth-head span { font-size: 12.5px; color: var(--ink-2); }
+.auth-card h2 { font-size: 20px; font-weight: 650; letter-spacing: -0.02em; }
+.auth-form { display: grid; gap: 12px; }
+.auth-form .input, .auth-card > .field .input { width: 100%; height: 40px; font-size: 14px; }
+.auth-form .btn { height: 42px; font-size: 14px; }
+.auth-error { color: var(--bad-text); font-size: 13px; min-height: 0; }
+.auth-error:empty { display: none; }
+.auth-links { font-size: 13px; color: var(--ink-2); }
+.linkish { border: 0; background: none; padding: 0; color: var(--accent-ink); font: inherit; cursor: pointer; text-decoration: underline; }
+.account-chip { display: flex; align-items: center; gap: 10px; font-size: 12.5px; }
+.account-chip .who { display: grid; line-height: 1.25; text-align: right; }
+.account-chip .who span { color: var(--ink-2); font-size: 11.5px; }
+.sync-state { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--surface-2); border: 1px solid var(--border); white-space: nowrap; }
+.sync-state svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.sync-state.saved { color: var(--good-text); }
+.sync-state.saving { color: var(--ink-2); }
+.sync-state.error { color: var(--bad-text); }
+.team-add { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 16px; border-top: 1px solid var(--border); }
+.team-add .input { flex: 1 1 180px; }
+.cell:disabled { color: var(--ink); opacity: 1; cursor: default; -webkit-text-fill-color: var(--ink); }
+body[data-role="staff"] .report-only, body[data-role="staff"] #pdf-btn, body[data-role="staff"] #view-seg,
+body[data-role="staff"] .nav a:not(.nav-sheet), body[data-role="staff"] .nav-group, body[data-role="staff"] .sidebar-foot { display: none !important; }
+@media (max-width: 760px) { .account-chip .who { display: none; } }
